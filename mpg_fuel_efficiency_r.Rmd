@@ -1,0 +1,109 @@
+
+title: "What Drives Fuel Efficiency? An R Analysis of 234 Cars"
+author: "Victor Chigbu"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)   # ggplot2, dplyr, etc. (install.packages("tidyverse") once)
+```
+
+## 1. Goal
+Which car characteristics explain highway fuel economy (`hwy`, miles per gallon)? I use the `mpg` dataset that ships with ggplot2: 234 car models from 1999 and 2008.
+
+## 2. Look at the data
+```{r}
+glimpse(mpg)
+summary(mpg$hwy)
+colSums(is.na(mpg))
+```
+**Observation:** The data has 234 cars and 11 columns, with no missing values. Highway mpg averages 23.4 (median 24) and ranges from 12 to 44. Most columns are categorical (manufacturer, class, drive type), so a regression will need them converted into dummy variables. That happens automatically in `lm`.
+
+## 3. Exploratory analysis
+```{r}
+ggplot(mpg, aes(hwy)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "white") +
+  labs(title = "Distribution of highway mpg", x = "Highway mpg")
+```
+
+```{r}
+ggplot(mpg, aes(displ, hwy)) +
+  geom_point(aes(color = class), size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(title = "Bigger engines get fewer miles per gallon",
+       x = "Engine displacement (litres)", y = "Highway mpg")
+```
+
+```{r}
+mpg %>%
+  group_by(class) %>%
+  summarise(cars = n(), mean_hwy = mean(hwy), sd_hwy = sd(hwy)) %>%
+  arrange(desc(mean_hwy))
+```
+
+```{r}
+ggplot(mpg, aes(reorder(class, hwy, FUN = median), hwy)) +
+  geom_boxplot(fill = "lightgray") +
+  coord_flip() +
+  labs(title = "Highway mpg by vehicle class", x = NULL, y = "Highway mpg")
+```
+
+```{r}
+ggplot(mpg, aes(drv, hwy, fill = drv)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(title = "Highway mpg by drive type (4 = 4wd, f = front, r = rear)",
+       x = "Drive type", y = "Highway mpg")
+```
+
+## 4. Statistical test
+Do front-wheel-drive cars really get better mileage than 4-wheel-drive, or could that be chance?
+```{r}
+fwd <- mpg %>% filter(drv == "f") %>% pull(hwy)
+fourwd <- mpg %>% filter(drv == "4") %>% pull(hwy)
+t.test(fwd, fourwd)
+```
+**Interpretation:** Front-wheel-drive cars average about 28.2 mpg on the highway versus 19.2 for 4-wheel-drive, a difference of roughly 9 mpg. The Welch t-test gives t of about 15.7 and a p-value far below 0.001, so chance is a very unlikely explanation. This is a difference in averages, not proof that the drivetrain causes it, because 4wd cars are mostly SUVs and pickups, which are heavy. Class and drive type are tangled together.
+
+## 5. Linear regression
+Train on 80% of the cars and test on the other 20%.
+```{r}
+# Every 5th car goes to the test set (20%), the rest to training.
+# This split is deterministic, so everyone gets the same result.
+test_idx <- seq(5, nrow(mpg), by = 5)
+train <- mpg[-test_idx, ]
+test  <- mpg[test_idx, ]
+
+m1 <- lm(hwy ~ displ, data = train)
+m2 <- lm(hwy ~ displ + cyl + drv + class, data = train)
+
+summary(m2)
+```
+
+```{r}
+rmse <- function(actual, pred) sqrt(mean((actual - pred)^2))
+
+results <- tibble(
+  model = c("Engine size only", "Size + cylinders + drive + class"),
+  test_rmse = c(rmse(test$hwy, predict(m1, test)),
+                rmse(test$hwy, predict(m2, test)))
+)
+results
+```
+Reading the results: engine size alone gives a test RMSE of about 3.5 mpg. The bigger model brings it down to about 2.3 mpg, a roughly 34% improvement. The training R-squared of the bigger model is about 0.83, versus 0.56 for engine size alone.
+
+## 6. Check the model assumptions
+```{r}
+par(mfrow = c(2, 2))
+plot(m2)
+par(mfrow = c(1, 1))
+```
+**Interpretation:** The residuals are mostly centered around zero and there is no strong curve, so a linear model is a reasonable fit. Two weaknesses show up. First, the spread is larger for high-mpg cars, so the errors are not perfectly constant. Second, the Q-Q plot is skewed on the right, driven by a few outliers such as the Volkswagen Jetta and New Beetle (44 and 41 mpg), which the model underpredicts by 10 to 14 mpg. These are probably diesel models, and the model has no fuel-type variable. I would treat the coefficients as approximate rather than exact.
+
+## 7. Conclusions
+- **Engine size is the strongest single predictor.** Highway mpg falls by about 3.4 mpg for every extra litre of displacement (R-squared of 0.56, correlation of about -0.77). Adding cylinders, drive type and vehicle class raises R-squared to about 0.83.
+- **Vehicle class matters a lot.** Compact (28.3 mpg), subcompact (28.1) and midsize (27.3) cars are the most efficient on average. SUVs (18.1) and pickups (16.9) are the least efficient. Controlling for the other variables, SUVs, pickups and minivans get roughly 8 to 9 mpg less than 2-seaters, and each extra cylinder costs about 1.3 mpg.
+- **Drive type shows a big raw gap that is mostly a class effect.** Front-wheel drive beats 4wd by about 9 mpg (p far below 0.001). In the full model that gap shrinks to about 3.6 mpg, because 4wd is common among heavy SUVs and pickups. After accounting for class, `displ` alone was no longer significant (p about 0.40), since cylinders and class capture the same information.
+- **Model quality:** The final model predicts held-out cars to within about 2.3 mpg RMSE, against 3.5 for engine size alone.
+- **Limitations:** The dataset has only 234 cars from two model years (1999 and 2008) and no weight, fuel type or transmission details. The model underpredicts a few very efficient cars, which are likely diesels, and its errors grow for high-mpg cars. Predictions for modern cars should not be trusted, and the results show association, not causation.
+- **What I would try next:** Add `fl` (fuel type) and `trans` as predictors, try `log(hwy)` to stabilize the variance, use cross-validation instead of a single split, and repeat the analysis with `cty` as the target.
